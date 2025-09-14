@@ -1,12 +1,14 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, Depends, HTTPException, Response, status, Request
 from pydantic import BaseModel, Field, condecimal, constr, field_validator
 from sqlalchemy.orm import Session
 from decimal import Decimal
-from app import crud, models, database
+from app import database, models, crud, auth
+from typing import List
+from fastapi.security import OAuth2PasswordBearer
 
-app = FastAPI(title="Expenses API with DB and Validation")
+app = FastAPI(title="Expenses API with JWT and User-specific CRUD")
 
-# ---------- DB Setup ----------
+# DB setup
 models.Base.metadata.create_all(bind=database.engine)
 
 def get_db():
@@ -32,32 +34,94 @@ class ExpenseCreate(BaseModel):
 class Expense(ExpenseCreate):
     id: int
 
-# ---------- ROUTES ----------
-@app.post("/expenses", response_model=Expense, status_code=status.HTTP_201_CREATED)
-def create_expense(payload: ExpenseCreate, db: Session = Depends(get_db)):
-    return crud.create_expense(db, payload.description, payload.amount)
+class UserCreate(BaseModel):
+    username: constr(min_length=3, max_length=50) = Field(..., example="user1")
+    password: constr(min_length=6) = Field(..., example="secret123")
 
-@app.get("/expenses", response_model=list[Expense])
-def list_expenses(db: Session = Depends(get_db)):
-    return crud.get_expenses(db)
+# ---------- Auth Helpers ----------
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.User:
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token missing")
+    payload = auth.decode_token(token)
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+    username = payload.get("sub")
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
+# ---------- Register ----------
+@app.post("/register", status_code=status.HTTP_201_CREATED)
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(models.User).filter(models.User.username == user.username).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
+    hashed_password = auth.get_password_hash(user.password)
+    new_user = models.User(username=user.username, hashed_password=hashed_password)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"msg": "User registered successfully"}
+
+# ---------- Login ----------
+@app.post("/login")
+def login(username: str, password: str, response: Response, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if not user or not auth.verify_password(password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    access_token = auth.create_access_token({"sub": user.username})
+    refresh_token = auth.create_refresh_token({"sub": user.username})
+    auth.set_tokens_in_cookies(response, access_token, refresh_token)
+    return {"msg": "Logged in"}
+
+# ---------- Refresh ----------
+@app.post("/refresh")
+def refresh_token(request: Request, response: Response):
+    token = request.cookies.get("refresh_token")
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token missing")
+    payload = auth.decode_token(token)
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+    username = payload.get("sub")
+    access_token = auth.create_access_token({"sub": username})
+    auth.set_tokens_in_cookies(response, access_token, token)  # refresh_token stays
+    return {"msg": "Access token refreshed"}
+
+# ---------- Logout ----------
+@app.post("/logout")
+def logout(response: Response):
+    auth.clear_tokens(response)
+    return {"msg": "Logged out"}
+
+# ---------- Expense CRUD (User-specific) ----------
+@app.post("/expenses", response_model=Expense, status_code=status.HTTP_201_CREATED)
+def create_expense(payload: ExpenseCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return crud.create_expense(db, payload.description, payload.amount, owner_id=current_user.id)
+
+@app.get("/expenses", response_model=List[Expense])
+def list_expenses(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return crud.get_expenses_by_user(db, user_id=current_user.id)
 
 @app.get("/expenses/{expense_id}", response_model=Expense)
-def get_expense(expense_id: int, db: Session = Depends(get_db)):
-    exp = crud.get_expense(db, expense_id)
+def get_expense(expense_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    exp = crud.get_expense_by_user(db, expense_id=expense_id, user_id=current_user.id)
     if not exp:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found")
     return exp
 
 @app.put("/expenses/{expense_id}", response_model=Expense)
-def update_expense(expense_id: int, payload: ExpenseCreate, db: Session = Depends(get_db)):
-    updated = crud.update_expense(db, expense_id, payload.description, payload.amount)
+def update_expense(expense_id: int, payload: ExpenseCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    updated = crud.update_expense_by_user(db, expense_id, current_user.id, payload.description, payload.amount)
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found")
     return updated
 
 @app.delete("/expenses/{expense_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_expense(expense_id: int, db: Session = Depends(get_db)):
-    deleted = crud.delete_expense(db, expense_id)
+def delete_expense(expense_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    deleted = crud.delete_expense_by_user(db, expense_id, current_user.id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found")
     return None
