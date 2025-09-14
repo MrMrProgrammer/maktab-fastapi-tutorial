@@ -1,0 +1,10 @@
+{
+  "user_registered": "User registered successfully",
+  "invalid_credentials": "Invalid credentials",
+  "logged_in": "Logged in successfully",
+  "access_token_refreshed": "Access token refreshed",
+  "logged_out": "Logged out",
+  "expense_created": "Expense created successfully",
+  "expense_not_found": "Expense not found",
+  "username_exists": "Username already exists"
+}

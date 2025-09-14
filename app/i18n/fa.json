@@ -1,0 +1,10 @@
+{
+  "user_registered": "کاربر با موفقیت ثبت شد",
+  "invalid_credentials": "نام کاربری یا رمز عبور نامعتبر است",
+  "logged_in": "ورود با موفقیت انجام شد",
+  "access_token_refreshed": "توکن دسترسی تازه شد",
+  "logged_out": "خروج با موفقیت انجام شد",
+  "expense_created": "هزینه با موفقیت ثبت شد",
+  "expense_not_found": "هزینه یافت نشد",
+  "username_exists": "نام کاربری قبلاً ثبت شده است"
+}
